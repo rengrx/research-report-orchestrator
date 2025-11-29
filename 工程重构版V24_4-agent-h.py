@@ -2444,7 +2444,7 @@ def editor_pro_upgrade(topic, chapter_title, section_title, subsection_title, fl
 
 def main():
     print("==========================================")
-    print("   🏭 V23.0 工程重构版研报工厂            ")
+    print("   🏭 V24.4-agent-h 工程重构版研报工厂   ")
     print("==========================================")
     
     # 1. 配置自检
