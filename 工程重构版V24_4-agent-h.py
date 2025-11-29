@@ -131,6 +131,8 @@ class Config:
         self.QUALITY_THRESHOLD = float(os.getenv("QUALITY_THRESHOLD", 8.0))  # 提高为8.0，确保高质量
         self.MAX_REFINEMENT_ROUNDS = int(os.getenv("MAX_REFINEMENT_ROUNDS", 4))  # 增加到4轮改进
         self.USE_TFIDF_RAG = os.getenv("USE_TFIDF_RAG", "true").lower() == "true"  # 启用向量检索
+        self.USE_EMBED_RAG = os.getenv("USE_EMBED_RAG", "false").lower() == "true"  # 启用 embedding 检索
+        self.EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-m3")  # 轻量模型，适合本地
 
         # 代理配置
         self.PROXY_URL = os.getenv("HTTP_PROXY") or "http://127.0.0.1:6152"
@@ -634,8 +636,11 @@ class MaterialManager:
         self.mineru_lang = getattr(CONF, "MINERU_LANG", "ch")
         self.mineru_timeout = getattr(CONF, "MINERU_TIMEOUT", 600)
         self.use_tfidf = getattr(CONF, "USE_TFIDF_RAG", False)
+        self.use_embed = getattr(CONF, "USE_EMBED_RAG", False)
         self.vectorizer = None
         self.tfidf_matrix = None
+        self.embed_model = None
+        self.embed_matrix = None
         self.bm25_model = None  # BM25 模型
         self.chunks_texts = None  # 用于 BM25 的分词后文本
         self.use_bm25 = HAS_BM25  # 是否使用 BM25
@@ -1022,6 +1027,20 @@ class MaterialManager:
         else:
             print("ℹ️ TF-IDF 已禁用，使用关键词匹配检索")
 
+        # 第四步：可选的 Embedding 索引
+        if self.use_embed:
+            try:
+                import numpy as np
+                from sentence_transformers import SentenceTransformer
+                model_name = getattr(CONF, "EMBED_MODEL", "BAAI/bge-m3")
+                self.embed_model = SentenceTransformer(model_name)
+                self.embed_matrix = self.embed_model.encode(texts, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+                print(f"✅ 已构建 Embedding 索引: 模型 {model_name}, 文档数 {len(texts)}, 维度 {self.embed_matrix.shape[1]}")
+            except Exception as e:
+                print(f"⚠️ Embedding 构建失败 ({type(e).__name__})，跳过向量检索: {e}")
+                self.embed_model = None
+                self.embed_matrix = None
+
     def retrieve(self, query, top_k=6):
         """
         改进的检索：Tier 1 + Tier 2 综合版
@@ -1097,6 +1116,21 @@ class MaterialManager:
                     self.use_bm25 = False
                     self.bm25_model = None
             
+            # 其次使用 Embedding 检索（可并行信号）
+            if self.use_embed and self.embed_model is not None and self.embed_matrix is not None:
+                try:
+                    import numpy as np
+                    q_vec = self.embed_model.encode(variant_query, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+                    sims = self.embed_matrix @ q_vec
+                    for idx, sim in enumerate(sims):
+                        if sim > 0:
+                            combined.append((float(sim), idx))
+                except Exception as e:
+                    print(f"ℹ️ Embedding 检索异常 ({type(e).__name__})，将继续其他信号: {e}")
+                    self.use_embed = False
+                    self.embed_model = None
+                    self.embed_matrix = None
+
             # 如果 BM25 无结果，使用 TF-IDF
             if not combined and self.use_tfidf and self.vectorizer is not None and self.tfidf_matrix is not None:
                 try:
@@ -1190,7 +1224,7 @@ class MaterialManager:
         # 记录查询日志
         analytics = get_query_analytics()
         if analytics:
-            retrieval_method = "BM25+jieba" if self.use_bm25 else "TF-IDF" if self.use_tfidf else "关键词"
+            retrieval_method = "BM25+jieba" if self.use_bm25 else "Embedding" if self.use_embed else "TF-IDF" if self.use_tfidf else "关键词"
             analytics.log_query(
                 query=query,
                 method=retrieval_method,
@@ -1200,7 +1234,7 @@ class MaterialManager:
             )
         
         if context:
-            retrieval_method = "BM25+jieba" if self.use_bm25 else "TF-IDF" if self.use_tfidf else "关键词"
+            retrieval_method = "BM25+jieba" if self.use_bm25 else "Embedding" if self.use_embed else "TF-IDF" if self.use_tfidf else "关键词"
             expansion_info = f"({len(query_variants)} 变体)" if len(query_variants) > 1 else ""
             print(f"      🧩 [RAG] 命中 {len(scored_results[:dynamic_top_k])} 个片段 [{retrieval_method}] {expansion_info} ({elapsed_ms:.1f}ms)")
         
@@ -1284,12 +1318,15 @@ def search_web(query, force=False, cache_dir=None, max_retries=3):
 
             return combined
         except Exception as e:
+            import traceback
+            print(f"   ❌ 搜索异常: {e.__class__.__name__} - {e}")
             if attempt < max_retries - 1:
                 wait = 2 ** attempt
-                print(f"   ⚠️ 搜索失败 ({e})，{wait}s 后重试...")
+                print(f"   ⚠️ 搜索失败，{wait}s 后重试...")
                 time.sleep(wait)
             else:
-                print(f"   ❌ 搜索彻底失败: {e}")
+                print(f"   ❌ 搜索彻底失败")
+                traceback.print_exc()
                 return ""
 
 # ================== 🛠️ 通用请求 (带重试) ==================
@@ -1325,11 +1362,19 @@ def validate_json_chart_data(chart_data):
     """
     errors = []
     
-    # 1. 基础字段检查
+    # 1. 基础字段检查和别名映射
     if 'chart_type' not in chart_data:
         errors.append("缺少 chart_type 字段")
-    elif chart_data['chart_type'] not in ['bar', 'line', 'pie', 'radar', 'mixed']:
-        errors.append(f"无效的 chart_type: {chart_data['chart_type']}")
+    else:
+        chart_type = str(chart_data['chart_type']).lower().strip()
+        # 别名映射
+        if chart_type in ['line & bar chart', 'line & bar', 'mixed bar/line']:
+            chart_type = 'mixed'
+        # 验证类型
+        if chart_type not in ['bar', 'line', 'pie', 'radar', 'mixed', 'table']:
+            errors.append(f"无效的 chart_type: {chart_data['chart_type']}")
+        else:
+            chart_data['chart_type'] = chart_type
     
     if 'title' not in chart_data or not chart_data['title']:
         errors.append("缺少 title 字段")
@@ -1351,21 +1396,31 @@ def validate_json_chart_data(chart_data):
     labels = data.get('labels', [])
     datasets = data.get('datasets', [])
     
-    # 3. 数据一致性检查
+    # 3. 数据一致性检查和强制转换
     for i, ds in enumerate(datasets):
         if 'values' not in ds or not ds['values']:
             errors.append(f"datasets[{i}] 缺少 values 或为空")
             continue
         
+        # 强制转换数值，非数字转为 0
+        normalized_values = []
+        for j, v in enumerate(ds['values']):
+            if isinstance(v, (int, float)):
+                normalized_values.append(v)
+            elif isinstance(v, str):
+                try:
+                    normalized_values.append(float(v))
+                except (ValueError, TypeError):
+                    # 非数字字符串转为 0
+                    normalized_values.append(0)
+            else:
+                # 其他类型转为 0
+                normalized_values.append(0)
+        ds['values'] = normalized_values
+        
+        # 检查长度
         if len(ds['values']) != len(labels):
             errors.append(f"datasets[{i}] 的值个数({len(ds['values'])}) != labels个数({len(labels)})")
-        
-        # 检查数值类型
-        for j, v in enumerate(ds['values']):
-            try:
-                float(v)
-            except (TypeError, ValueError):
-                errors.append(f"datasets[{i}].values[{j}] 不是有效数字: {v}")
     
     # 4. 数据范围检查
     if errors:
@@ -2550,6 +2605,12 @@ def call_pro(prompt, temperature=0.4, response_mime_type="text/plain"):
 def call_gemini(prompt, json_mode=False):
     """调用 Gemini (用于大纲/统筹)，带明确的错误处理
     使用 gemini-3-pro-preview 获得最优的结构化输出"""
+    # 禁用代理以避免代理故障
+    os.environ.pop('HTTP_PROXY', None)
+    os.environ.pop('HTTPS_PROXY', None)
+    os.environ.pop('http_proxy', None)
+    os.environ.pop('https_proxy', None)
+    
     model_id = CONF.GEMINI_OUTLINE_MODEL
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={CONF.GEMINI_API_KEY}"
     payload = {
@@ -2562,11 +2623,8 @@ def call_gemini(prompt, json_mode=False):
         }
     }
     
-    # 先走代理，失败后直连重试一次；代理不可用时直接直连
-    resp = call_api_robust(url, payload, headers={"Content-Type": "application/json"}, proxies=CONF.PROXIES_CLOUD, timeout=120)
-    if not resp:
-        print("   ↻ 尝试直连 Gemini 再试一次...")
-        resp = call_api_robust(url, payload, headers={"Content-Type": "application/json"}, proxies={"http": None, "https": None}, timeout=120)
+    # 直接直连（已禁用代理）
+    resp = call_api_robust(url, payload, headers={"Content-Type": "application/json"}, proxies={"http": None, "https": None}, timeout=120)
     if not resp:
         return None
     try:
@@ -2581,6 +2639,12 @@ def call_local(prompt, model_name=None, temperature=0.6):
     temperature: 0.3-0.5(精准) / 0.6(均衡) / 0.7-0.9(创意)
     使用 gemini-3-pro-preview 获得最优的内容生成质量
     """
+    # 禁用代理以避免代理故障
+    os.environ.pop('HTTP_PROXY', None)
+    os.environ.pop('HTTPS_PROXY', None)
+    os.environ.pop('http_proxy', None)
+    os.environ.pop('https_proxy', None)
+    
     # 附加图表类型参考信息
     chart_type_hint = """
     
@@ -2636,7 +2700,8 @@ def call_local(prompt, model_name=None, temperature=0.6):
             "top_k": 40
         }
     }
-    resp = call_api_robust(url, payload, headers={"Content-Type": "application/json"}, proxies=CONF.PROXIES_CLOUD, timeout=120)
+    # 直接直连（已禁用代理）
+    resp = call_api_robust(url, payload, headers={"Content-Type": "application/json"}, proxies={"http": None, "https": None}, timeout=120)
     if not resp:
         return None
     try:
@@ -2978,6 +3043,21 @@ def main():
     print("   🏭 V24.4-agent-h 工程重构版研报工厂   ")
     print("==========================================")
     
+    # CLI 参数（支持非交互批量运行）
+    parser = argparse.ArgumentParser(description="Research Report Orchestrator")
+    parser.add_argument("--topic", type=str, help="研报主题，提供则跳过交互输入")
+    parser.add_argument("--pages", type=int, help="目标页数（可选，会覆盖 TARGET_PAGES）")
+    parser.add_argument("--use-mineru", action=argparse.BooleanOptionalAction, default=None, help="强制启用/关闭 MinerU")
+    parser.add_argument("--use-embed", action=argparse.BooleanOptionalAction, default=None, help="启用/关闭 embedding 检索")
+    args = parser.parse_args()
+    
+    if args.pages:
+        CONF.TARGET_PAGES = args.pages
+    if args.use_mineru is not None:
+        CONF.USE_MINERU = args.use_mineru
+    if args.use_embed is not None:
+        CONF.USE_EMBED_RAG = args.use_embed
+    
     # 1. 配置自检
     CONF.validate()
     
@@ -3031,8 +3111,12 @@ def main():
     print("☁️ 本轮使用 Gemini 3.0 Pro Preview（大纲 + 写作）- 最新统一架构")
 
     # 3. 获取主题
-    topic = input("\n👉 请输入研报主题 (例如: 电力现货市场): ").strip()
-    if not topic: return
+    if args.topic:
+        topic = args.topic.strip()
+    else:
+        topic = input("\n👉 请输入研报主题 (例如: 电力现货市场): ").strip()
+    if not topic: 
+        return
     
     # 3. 路径准备 - 按主题自动创建独立文件夹
     folder_name = topic.replace(" ", "_").replace("/", "_")

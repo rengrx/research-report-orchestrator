@@ -1,0 +1,5 @@
+timestamp,query,method,results_count,response_time_ms,cache_hit,user_feedback
+2025-11-29T22:06:06.569693,"电力现货",BM25+jieba,5,18.5,False,
+2025-11-29T22:06:06.569743,"电力现货",Cache,5,1.2,True,
+2025-11-29T22:06:06.569778,"光伏",BM25+jieba,3,15.8,False,
+2025-11-29T22:06:06.569808,"光伏",Cache,3,0.9,True,
