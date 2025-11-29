@@ -253,6 +253,15 @@ class MaterialManager:
         
         print(f"\n📚 正在扫描素材目录及子目录，发现 {len(files)} 份文件...")
         
+        if len(files) == 0:
+            print(f"⚠️ 素材目录为空: {self.folder}")
+            print("👉 请将以下格式的文件放入该目录:")
+            print("   • PDF 文件 (.pdf)")
+            print("   • Word 文档 (.docx, .doc)")
+            print("   • 文本文件 (.txt, .md)")
+            print("   • 图片文件 (.png, .jpg, .jpeg)")
+            print("")
+        
         loaded_count = 0
         for fpath in files:
             if os.path.basename(fpath).startswith('.'): continue # 跳过隐藏文件
@@ -370,17 +379,33 @@ class MaterialManager:
         # 素材质量诊断
         print("\n🔍 素材质量诊断:")
         if not self.chunks:
-            print("  ⚠️ 未加载任何 chunks！请检查:")
-            print("     • 输入文件夹路径是否正确？")
-            print("     • 文件夹中是否有 .md/.txt/.pdf 等文件？")
-            print("     • 文件是否为空？")
+            print("  ⚠️ 未加载任何 chunks！")
+            print("")
+            print("  📋 可能的原因:")
+            print("     1️⃣ 素材目录为空")
+            print(f"        • 路径: {self.folder}")
+            print(f"        • 请将 PDF/Word/Txt 文件放入此目录")
+            print("")
+            print("     2️⃣ 文件格式不支持")
+            print("        • 支持的格式: .pdf, .docx, .doc, .txt, .md, .png, .jpg")
+            print("")
+            print("     3️⃣ 文件内容为空")
+            print("        • 请检查文件是否包含实际内容")
+            print("")
+            print("  💡 调试建议:")
+            print(f"     • 运行: ls -la {self.folder}")
+            print("     • 验证文件是否存在且不为空")
         else:
             total_chars = sum(len(c.get("text", "")) for c in self.chunks)
             valid_texts = sum(1 for c in self.chunks if c.get("text", "").strip())
             avg_size = total_chars / len(self.chunks) if self.chunks else 0
-            print(f"  • 总 chunks: {len(self.chunks)}, 有效文本: {valid_texts}, 平均大小: {avg_size:.0f} 字符")
+            print(f"  ✅ 已加载 chunks:")
+            print(f"     • 总数: {len(self.chunks)}")
+            print(f"     • 有效文本: {valid_texts}")
+            print(f"     • 总字符数: {total_chars}")
+            print(f"     • 平均大小: {avg_size:.0f} 字符/chunk")
             if valid_texts < len(self.chunks):
-                print(f"  ⚠️ 有 {len(self.chunks) - valid_texts} 个 chunks 文本为空，可能影响检索")
+                print(f"  ⚠️ 警告: 有 {len(self.chunks) - valid_texts} 个 chunks 文本为空或过短")
         
         # 构建 TF-IDF 向量索引（可选）
         self._build_vector_index()
@@ -549,9 +574,17 @@ class MaterialManager:
             print("⚠️ 无有效文本内容用于 TF-IDF 索引")
             print(f"   📊 统计: 总 chunks 数 {len(self.chunks)}, 有效文本数 {len(texts)}")
             # 详细诊断
-            empty_count = sum(1 for c in self.chunks if not c.get("text", "").strip())
-            short_count = sum(1 for c in self.chunks if 0 < len(c.get("text", "").strip()) <= 10)
-            print(f"   🔍 诊断: 空文本 {empty_count} 个, 超短文本 {short_count} 个")
+            if len(self.chunks) == 0:
+                print("   🔍 原因: 未加载任何 chunks")
+                print("   💡 解决: 请确保素材目录中有文件且不为空")
+            else:
+                empty_count = sum(1 for c in self.chunks if not c.get("text", "").strip())
+                short_count = sum(1 for c in self.chunks if 0 < len(c.get("text", "").strip()) <= 10)
+                print(f"   🔍 诊断:")
+                print(f"      • 空文本 chunks: {empty_count}")
+                print(f"      • 超短文本 chunks (≤10字符): {short_count}")
+                if empty_count + short_count == len(self.chunks):
+                    print(f"   💡 解决: 所有 chunks 都无有效内容，请检查文件解析是否成功")
             self.use_tfidf = False
             self.vectorizer = None
             self.tfidf_matrix = None
