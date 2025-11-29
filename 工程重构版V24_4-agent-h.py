@@ -92,7 +92,7 @@ class Config:
     def __init__(self):
         # 优先从环境变量读取，否则设为 None
         self.GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-        self.TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+        self.TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "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")
         
         # 默认配置
         self.GEMINI_OUTLINE_MODEL = "gemini-3-pro-preview"  # 升级：使用最新 Gemini 3.0 Pro 构建大纲
