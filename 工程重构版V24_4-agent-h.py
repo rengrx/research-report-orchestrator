@@ -367,6 +367,21 @@ class MaterialManager:
             parser = stats.get("parser", "builtin")
             print(f"  {fname}: {stats['chunks']} chunks ({stats['total_chars']} 字符) [{parser}]")
         
+        # 素材质量诊断
+        print("\n🔍 素材质量诊断:")
+        if not self.chunks:
+            print("  ⚠️ 未加载任何 chunks！请检查:")
+            print("     • 输入文件夹路径是否正确？")
+            print("     • 文件夹中是否有 .md/.txt/.pdf 等文件？")
+            print("     • 文件是否为空？")
+        else:
+            total_chars = sum(len(c.get("text", "")) for c in self.chunks)
+            valid_texts = sum(1 for c in self.chunks if c.get("text", "").strip())
+            avg_size = total_chars / len(self.chunks) if self.chunks else 0
+            print(f"  • 总 chunks: {len(self.chunks)}, 有效文本: {valid_texts}, 平均大小: {avg_size:.0f} 字符")
+            if valid_texts < len(self.chunks):
+                print(f"  ⚠️ 有 {len(self.chunks) - valid_texts} 个 chunks 文本为空，可能影响检索")
+        
         # 构建 TF-IDF 向量索引（可选）
         self._build_vector_index()
 
@@ -521,18 +536,33 @@ class MaterialManager:
             return
         
         # 第二步：如果成功导入，继续向量化处理
-        texts = [c.get("text", "") for c in self.chunks if c.get("text")]
+        # 更严格的过滤：排除空字符串、仅空白符的文本
+        texts = []
+        valid_chunks = []
+        for i, c in enumerate(self.chunks):
+            text = c.get("text", "").strip()
+            if text and len(text) > 10:  # 至少 10 个字符
+                texts.append(text)
+                valid_chunks.append(c)
+        
         if not texts:
             print("⚠️ 无有效文本内容用于 TF-IDF 索引")
+            print(f"   📊 统计: 总 chunks 数 {len(self.chunks)}, 有效文本数 {len(texts)}")
+            # 详细诊断
+            empty_count = sum(1 for c in self.chunks if not c.get("text", "").strip())
+            short_count = sum(1 for c in self.chunks if 0 < len(c.get("text", "").strip()) <= 10)
+            print(f"   🔍 诊断: 空文本 {empty_count} 个, 超短文本 {short_count} 个")
             self.use_tfidf = False
             self.vectorizer = None
             self.tfidf_matrix = None
             return
         
         try:
-            self.vectorizer = TfidfVectorizer(max_features=50000)
+            self.vectorizer = TfidfVectorizer(max_features=50000, min_df=1, max_df=0.95)
             self.tfidf_matrix = self.vectorizer.fit_transform(texts)
             print(f"✅ 已构建 TF-IDF 向量索引: 文档数 {len(texts)}, 维度 {self.tfidf_matrix.shape[1]}")
+            # 更新 chunks 指向有效的文本
+            self.chunks = valid_chunks
         except Exception as e:
             print(f"⚠️ TF-IDF 构建失败，回退关键词检索: {type(e).__name__}: {str(e)[:60]}")
             self.vectorizer = None
